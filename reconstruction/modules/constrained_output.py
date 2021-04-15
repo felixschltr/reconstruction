@@ -25,13 +25,14 @@ class ConstrainedOutputModel(Module):
             called. Optional.
     """
 
-    def __init__(self, model: Module, target_fn=None):
+    def __init__(self, model: Module, target_fn=None, forward_kwargs=None):
         """Initializes ConstrainedOutputModel."""
         super().__init__()
         if target_fn is None:
             target_fn = lambda x: x
         self.model = model
         self.target_fn = target_fn
+        self.forward_kwargs = forward_kwargs if forward_kwargs is not None else dict()
 
     def __call__(self, x: Tensor, *args, **kwargs) -> Tensor:
         """Computes the constrained output of the model.
