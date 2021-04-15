@@ -1,5 +1,5 @@
-import datajoint as dj
 from __future__ import annotations
+import datajoint as dj
 from typing import Dict, Any
 
 import torch
