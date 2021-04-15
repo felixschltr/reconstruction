@@ -279,7 +279,7 @@ class Reconstruction(mixins.MEITemplateMixin, dj.Computed):
         model.eval().cuda()
         model = IntermediateLayerModelVGG(model=model, return_layer=return_layer)
         responses = self.get_model_responses(model, image)
-
+        print(responses.shape)
         target_fn = (self.target_fn_table & key).get_target_fn(responses=responses)
         output_selected_model = self.selector_table().get_output_selected_model(
             model=model,
