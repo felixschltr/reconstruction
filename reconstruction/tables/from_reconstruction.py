@@ -20,7 +20,10 @@ from nnfabrik.utility.dj_helpers import CustomSchema, make_hash, cleanup_numpy_s
 from bias_transfer.tables.trained_model import *
 from bias_transfer.tables.trained_transfer_model import *
 
-from ..modules.constrained_output import IntermediateLayerOutput
+from ..modules.constrained_output import (
+    IntermediateLayerModelVGG,
+    ConstrainedOutputModel,
+)
 from nnfabrik.builder import resolve_fn
 
 resolve_target_fn = partial(resolve_fn, default_base="targets")
@@ -183,7 +186,7 @@ class ReconTargetUnit(dj.Manual):
 class ReconObjective(dj.Computed):
     target_fn_table = ReconTargetFunction
     target_unit_table = ReconTargetUnit
-    constrained_output_model = IntermediateLayerOutput
+    constrained_output_model = ConstrainedOutputModel
 
     @property
     def definition(self):
@@ -207,12 +210,10 @@ class ReconObjective(dj.Computed):
         self,
         model: Module,
         target_fn: Callable,
-        return_layer: Dict,
     ) -> constrained_output_model:
 
         return self.constrained_output_model(
             model=model,
-            return_layer=return_layer,
             target_fn=target_fn,
         )
 
@@ -227,7 +228,7 @@ class Reconstruction(mixins.MEITemplateMixin, dj.Computed):
     -> self.image_table
     -> self.seed_table
     ---
-    reconstruction      : attach@minio  # the MEI as a tensor
+    mei                 : attach@minio  # the MEI as a tensor
     score               : float         # some score depending on the used method function
     output              : attach@minio  # object returned by the method function
     """
@@ -262,7 +263,6 @@ class Reconstruction(mixins.MEITemplateMixin, dj.Computed):
         with torch.no_grad():
             responses = model(
                 image.to(device),
-                data_key=key["data_key"],
                 **kwargs,
             )
         return responses
@@ -277,23 +277,17 @@ class Reconstruction(mixins.MEITemplateMixin, dj.Computed):
     def make(self, key):
         dataloaders, model = self.model_loader.load(key=key)
         seed = (self.seed_table() & key).fetch1("mei_seed")
-        image = (self.image_table & key).fetch1("image")
-
-        responses = self.get_model_responses(
-            model=model,
-            key=key,
-            image=image,
-        )
+        image = torch.from_numpy((self.image_table & key).fetch1("image"))
+        return_layer = (self.target_unit_table & key).fetch1("return_layer")
+        model = IntermediateLayerModelVGG(model=model, return_layer=return_layer)
+        responses = self.get_model_responses(model, key, image)
 
         target_fn = (self.target_fn_table & key).get_target_fn(responses=responses)
-
-        return_layer = (self.target_unit_table & key).fetch1("return_layer")
-
         output_selected_model = self.selector_table().get_output_selected_model(
             model=model,
             target_fn=target_fn,
-            return_layer=return_layer,
         )
+
         mei_entity = self.method_table().generate_mei(
             dataloaders, output_selected_model, key, seed
         )
