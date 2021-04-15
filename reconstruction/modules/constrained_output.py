@@ -3,24 +3,34 @@ from torch.nn import Module, ModuleList
 from torchvision.models._utils import IntermediateLayerGetter
 
 
-class IntermediateLayerOutput(Module):
+class IntermediateLayerModelVGG():
+    def __init__(self, model, return_layer):
+        self.model = IntermediateLayerGetter(model.features, return_layer)
+        self.return_key = list(return_layer.values())[0]
+
+    def __call__(self, x, *args, **kwargs):
+        output = self.model(x, *args, **kwargs)[self.return_key]
+        return output
+
+
+class ConstrainedOutputModel(Module):
     """A model that has its output constrained.
 
     Attributes:
         model: A PyTorch module.
-        return_layer: example:  {'0': 'out_layer0',}
+        constraint: An integer representing the index of a neuron in the model's output. Only the value corresponding
+            to that index will be returned.
         target_fn: Callable, that gets as an input the constrained output of the model.
+        forward_kwargs: A dictionary containing keyword arguments that will be passed to the model every time it is
+            called. Optional.
     """
 
-    def __init__(self, model, return_layer, target_fn=None, ):
+    def __init__(self, model: Module, target_fn=None):
         """Initializes ConstrainedOutputModel."""
         super().__init__()
         if target_fn is None:
             target_fn = lambda x: x
-        if len(list(return_layer.keys())) > 1:
-            raise ValueError("Output can only be constraint with a single layer")
-        self.model = IntermediateLayerGetter(model.features, return_layer)
-        self.return_key = list(return_layer.values())[0]
+        self.model = model
         self.target_fn = target_fn
 
     def __call__(self, x: Tensor, *args, **kwargs) -> Tensor:
@@ -34,8 +44,8 @@ class IntermediateLayerOutput(Module):
         Returns:
             A tensor representing the constrained output of the model.
         """
-        output = self.model(x, *args, **kwargs)[self.return_key]
+        output = self.model(x, *args, **self.forward_kwargs, **kwargs)
         return self.target_fn(output)
 
     def __repr__(self):
-        return f"{self.__class__.__qualname__}({self.model}, )"
+        return f"{self.__class__.__qualname__}({self.model})"
