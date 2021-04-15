@@ -257,13 +257,10 @@ class Reconstruction(mixins.MEITemplateMixin, dj.Computed):
             )
             return definition
 
-    def get_model_responses(self, model, key, image, device="cuda", **kwargs):
-        model.eval().to(device)
-
+    def get_model_responses(self, model, image, device="cuda"):
         with torch.no_grad():
             responses = model(
                 image.to(device),
-                **kwargs,
             )
         return responses
 
@@ -279,8 +276,9 @@ class Reconstruction(mixins.MEITemplateMixin, dj.Computed):
         seed = (self.seed_table() & key).fetch1("mei_seed")
         image = torch.from_numpy((self.image_table & key).fetch1("image"))
         return_layer = (self.target_unit_table & key).fetch1("return_layer")
+        model.eval().cuda()
         model = IntermediateLayerModelVGG(model=model, return_layer=return_layer)
-        responses = self.get_model_responses(model, key, image)
+        responses = self.get_model_responses(model, image)
 
         target_fn = (self.target_fn_table & key).get_target_fn(responses=responses)
         output_selected_model = self.selector_table().get_output_selected_model(
@@ -295,9 +293,7 @@ class Reconstruction(mixins.MEITemplateMixin, dj.Computed):
         reconstructed_image = mei_entity["mei"]
         reconstructed_responses = self.get_model_responses(
             model=model,
-            key=key,
             image=reconstructed_image,
-            behavior=None,
         )
         response_entity = dict(
             original_responses=responses,
