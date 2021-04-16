@@ -11,3 +11,15 @@ class IntermediateLayerModelVGG():
     def __call__(self, x, *args, **kwargs):
         output = self.model(x, *args, **kwargs)[self.return_key]
         return output
+
+
+class IntermediateLayerModelVGGLoop():
+    def __init__(self, model, layer):
+        self.features = model.features
+        self.layer = layer
+
+    def __call__(self, x, *args, **kwargs):
+        for name, child in self.features.named_children():
+            if int(name) <= self.layer:
+                x = self.features[name](x)
+        return x
