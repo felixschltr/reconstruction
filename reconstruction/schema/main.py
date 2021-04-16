@@ -278,7 +278,7 @@ class Reconstruction(mixins.MEITemplateMixin, dj.Computed):
         responses = self.get_model_responses(wrapper, image)
         target_fn = (self.target_fn_table & key).get_target_fn(responses=responses)
         output_selected_model = self.selector_table().get_output_selected_model(
-            model=model, target_fn=target_fn
+            model=wrapper, target_fn=target_fn
         )
 
         mei_entity = self.method_table().generate_mei(
