@@ -42,22 +42,16 @@ class ReconSeed(mixins.MEISeedMixin, dj.Lookup):
 class ReconstructionImages(dj.Manual):
     definition = """
       # images for reconstruction
-      img_id: int                  # unique id
-      img_class: varchar(64)
+      img_id:    int                  # unique id
+      img_class: varchar(64)          # image type descriptor
       ---
-      image: BLOB                      # actual image
+      image: longblob                 # actual image as numpy array
       """
 
 
 @schema
 class ReconMethod(mixins.MEIMethodMixin, dj.Lookup):
     seed_table = ReconSeed
-    optional_names = optional_names = (
-        "transform",
-        "regularization",
-        "precondition",
-        "postprocessing",
-    )
 
 
 @schema
@@ -79,7 +73,7 @@ class ReconTargetFunction(dj.Manual):
         return target_fn, target_config
 
     def add_entry(
-        self, target_fn, target_config, target_comment="", skip_duplicates=False
+            self, target_fn, target_config, target_comment="", skip_duplicates=False
     ):
         """
         Add a new entry to the TargetFunction table.
@@ -132,6 +126,7 @@ class ReconTargetFunction(dj.Manual):
 class ReconTargetUnit(dj.Manual):
     definition = """
     -> Model
+    unit_fn:                        varchar(128)
     unit_hash:                      varchar(128)
     ---
     return_layer:                   longblob       # list of unit_ids 
@@ -140,12 +135,13 @@ class ReconTargetUnit(dj.Manual):
     dataset_table = Dataset
 
     def add_entry(
-        self,
-        model_fn,
-        model_hash,
-        return_layer,
-        unit_comment="",
-        skip_duplicates=False,
+            self,
+            model_fn,
+            model_hash,
+            unit_fn,
+            unit_config,
+            unit_comment="",
+            skip_duplicates=False,
     ):
         """
         Add a new entry to the TargetFunction table.
@@ -161,12 +157,13 @@ class ReconTargetUnit(dj.Manual):
             key - key in the table corresponding to the new (or possibly existing, if skip_duplicates=True) entry.
         """
 
-        unit_hash = make_hash(return_layer)
+        unit_hash = make_hash(unit_config)
         key = dict(
             model_fn=model_fn,
             model_hash=model_hash,
             unit_hash=unit_hash,
-            return_layer=return_layer,
+            unit_fn=unit_fn,
+            unit_config=unit_config,
             unit_comment=unit_comment,
         )
         existing = self.proj() & key
@@ -207,9 +204,9 @@ class ReconObjective(dj.Computed):
         self.insert1(key)
 
     def get_output_selected_model(
-        self,
-        model: Module,
-        target_fn: Callable,
+            self,
+            model: Module,
+            target_fn: Callable,
     ) -> constrained_output_model:
 
         return self.constrained_output_model(
