@@ -3,7 +3,7 @@ from torch.nn import Module, ModuleList
 from torchvision.models._utils import IntermediateLayerGetter
 
 
-class IntermediateLayerModelVGG():
+class IntermediateLayerModelVGG:
     def __init__(self, model, return_layer):
         self.model = IntermediateLayerGetter(model.features, return_layer)
         self.return_key = list(return_layer.values())[0]
@@ -13,7 +13,7 @@ class IntermediateLayerModelVGG():
         return output
 
 
-class IntermediateLayerModelVGGLoop():
+class IntermediateLayerModelVGGLoop:
     def __init__(self, model, layer):
         self.features = model.features
         self.layer = layer
