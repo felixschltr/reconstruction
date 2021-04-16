@@ -271,7 +271,7 @@ class Reconstruction(mixins.MEITemplateMixin, dj.Computed):
 
     def make(self, key):
         dataloaders, model = self.model_loader.load(key=key)
-        model().eval().cuda()
+        model.eval().cuda()
         seed = (self.seed_table() & key).fetch1("mei_seed")
         image = torch.from_numpy((self.image_table & key).fetch1("image"))
         wrapper = self.target_unit_table().get_wrapper(key, model)
