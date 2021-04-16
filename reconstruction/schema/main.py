@@ -124,7 +124,7 @@ class ReconTargetUnit(dj.Manual):
     unit_fn:                        varchar(128)
     unit_hash:                      varchar(128)
     ---
-    return_layer:                   longblob       # list of unit_ids 
+    unit_config:                   longblob       # list of unit_ids 
     unit_comment:                   varchar(128)
     """
     dataset_table = Dataset
