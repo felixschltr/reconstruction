@@ -1,36 +1,29 @@
 from __future__ import annotations
-import datajoint as dj
-from typing import Dict, Any
-
-import torch
-from torch.nn import Module
-from torch.utils.data import DataLoader
-
-Key = Dict[str, Any]
-Dataloaders = Dict[str, DataLoader]
-
 import warnings
 from functools import partial
 from typing import Dict, Any, Callable, List
+Key = Dict[str, Any]
+Dataloaders = Dict[str, DataLoader]
+
+import torch
+from torch.nn import Module
 
 import datajoint as dj
 from nnfabrik.main import Dataset
+from nnfabrik.builder import resolve_fn
 from nnfabrik.utility.dj_helpers import CustomSchema, make_hash, cleanup_numpy_scalar
 
 from bias_transfer.tables.trained_model import *
 from bias_transfer.tables.trained_transfer_model import *
 
-from ..modules.constrained_output import (
-    IntermediateLayerModelVGG,
-    ConstrainedOutputModel,
-)
-from nnfabrik.builder import resolve_fn
-
-resolve_target_fn = partial(resolve_fn, default_base="targets")
-
 from mei import mixins
+from mei.import_helpers import import_object
+
+from ..modules.reducers import ConstrainedOutputModel
+
 
 schema = CustomSchema(dj.config.get("schema_name", "nnfabrik_core"))
+resolve_target_fn = partial(resolve_fn, default_base="targets")
 
 
 @schema
@@ -73,7 +66,7 @@ class ReconTargetFunction(dj.Manual):
         return target_fn, target_config
 
     def add_entry(
-            self, target_fn, target_config, target_comment="", skip_duplicates=False
+        self, target_fn, target_config, target_comment="", skip_duplicates=False
     ):
         """
         Add a new entry to the TargetFunction table.
@@ -135,13 +128,13 @@ class ReconTargetUnit(dj.Manual):
     dataset_table = Dataset
 
     def add_entry(
-            self,
-            model_fn,
-            model_hash,
-            unit_fn,
-            unit_config,
-            unit_comment="",
-            skip_duplicates=False,
+        self,
+        model_fn,
+        model_hash,
+        unit_fn,
+        unit_config,
+        unit_comment="",
+        skip_duplicates=False,
     ):
         """
         Add a new entry to the TargetFunction table.
@@ -178,6 +171,12 @@ class ReconTargetUnit(dj.Manual):
 
         return key
 
+    def get_wrapper(self, key, model):
+        unit_fn, unit_config = (self & key).fetch1("unit_fn", "unit_config")
+        object_kwargs = dict(model=model, **unit_config)
+        wrapper = import_object(path=unit_fn, object_kwargs=object_kwargs)
+        return wrapper
+
 
 @schema
 class ReconObjective(dj.Computed):
@@ -204,9 +203,9 @@ class ReconObjective(dj.Computed):
         self.insert1(key)
 
     def get_output_selected_model(
-            self,
-            model: Module,
-            target_fn: Callable,
+        self,
+        model: Module,
+        target_fn: Callable,
     ) -> constrained_output_model:
 
         return self.constrained_output_model(
@@ -270,17 +269,14 @@ class Reconstruction(mixins.MEITemplateMixin, dj.Computed):
 
     def make(self, key):
         dataloaders, model = self.model_loader.load(key=key)
+        model().eval().cuda()
         seed = (self.seed_table() & key).fetch1("mei_seed")
         image = torch.from_numpy((self.image_table & key).fetch1("image"))
-        return_layer = (self.target_unit_table & key).fetch1("return_layer")
-        model.eval().cuda()
-        model = IntermediateLayerModelVGG(model=model, return_layer=return_layer)
-        responses = self.get_model_responses(model, image)
-        print(responses.shape)
+        wrapper = self.target_unit_table().get_wrapper(key, model)
+        responses = self.get_model_responses(wrapper, image)
         target_fn = (self.target_fn_table & key).get_target_fn(responses=responses)
         output_selected_model = self.selector_table().get_output_selected_model(
-            model=model,
-            target_fn=target_fn,
+            model=model, target_fn=target_fn
         )
 
         mei_entity = self.method_table().generate_mei(
@@ -289,7 +285,7 @@ class Reconstruction(mixins.MEITemplateMixin, dj.Computed):
 
         reconstructed_image = mei_entity["mei"]
         reconstructed_responses = self.get_model_responses(
-            model=model,
+            model=wrapper,
             image=reconstructed_image,
         )
         response_entity = dict(
