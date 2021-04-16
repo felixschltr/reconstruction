@@ -2,11 +2,13 @@ from __future__ import annotations
 import warnings
 from functools import partial
 from typing import Dict, Any, Callable, List
-Key = Dict[str, Any]
-Dataloaders = Dict[str, DataLoader]
 
 import torch
 from torch.nn import Module
+from torch.utils.data import DataLoader
+
+Key = Dict[str, Any]
+Dataloaders = Dict[str, DataLoader]
 
 import datajoint as dj
 from nnfabrik.main import Dataset
