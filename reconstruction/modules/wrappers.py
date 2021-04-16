@@ -21,5 +21,5 @@ class IntermediateLayerModelVGGLoop():
     def __call__(self, x, *args, **kwargs):
         for name, child in self.features.named_children():
             if int(name) <= self.layer:
-                x = self.features[name](x)
+                x = self.features[int(name)](x)
         return x
