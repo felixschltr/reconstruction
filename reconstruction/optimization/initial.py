@@ -23,7 +23,7 @@ class OriginalImage(InitialGuessCreator):
 
     def __init__(self, image_class, image_id):
 
-        image = (ReconstructionImages & dict(image_class=image_class, image_id=image_id)).fetch1("image")
+        image = torch.from_numpy((ReconstructionImages & dict(image_class=image_class, image_id=image_id)).fetch1("image"))
         self.natural_img = image.repeat(1, 3, 1, 1)
 
     def __call__(self, *shape):
