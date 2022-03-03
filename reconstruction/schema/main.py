@@ -15,8 +15,10 @@ from nnfabrik.main import Dataset
 from nnfabrik.builder import resolve_fn
 from nnfabrik.utility.dj_helpers import CustomSchema, make_hash, cleanup_numpy_scalar
 
-from bias_transfer.tables.trained_model import *
-from bias_transfer.tables.trained_transfer_model import *
+#from bias_transfer.tables.trained_model import *
+#from bias_transfer.tables.trained_transfer_model import *
+
+from reconstructing_robustness.dj_tables.nnfabrik import *
 
 from mei import mixins
 from mei.import_helpers import import_object
@@ -44,10 +46,37 @@ class ReconstructionImages(dj.Manual):
       """
 
 
+#@schema
+#class ReconMethod(mixins.MEIMethodMixin, dj.Lookup):
+#    seed_table = ReconSeed
+
 @schema
 class ReconMethod(mixins.MEIMethodMixin, dj.Lookup):
     seed_table = ReconSeed
+    optional_names = (
+        "initial",
+        "optimizer",
+        "transform",
+        "regularization",
+        "precondition",
+        "postprocessing",
+    )
 
+    def generate_mei(
+        self, dataloaders: Dataloaders, model: Module, key: Key, seed: int
+    ) -> Dict[str, Any]:
+        method_fn, method_config = (self & key).fetch1("method_fn", "method_config")
+        self.insert_key_in_ops(method_config=method_config, key=key)
+        method_fn = self.import_func(method_fn)
+        mei, score, output = method_fn(dataloaders, model, method_config, seed)
+        return dict(key, mei=mei, score=score, output=output)
+
+    def insert_key_in_ops(self, method_config, key):
+        for k, v in method_config.items():
+            if k in self.optional_names:
+                if "kwargs" in v:
+                    if "key" in v["kwargs"]:
+                        v["kwargs"]["key"] = key
 
 @schema
 class ReconTargetFunction(dj.Manual):
@@ -269,8 +298,36 @@ class Reconstruction(mixins.MEITemplateMixin, dj.Computed):
                 self._save_to_disk(response_entity, temp_dir, name)
             self.Responses.insert1(response_entity, ignore_extra_fields=True)
 
+    def get_dataloader_model(self, key):
+        # get dataset table
+        dataset_table = self.trained_model_table().dataset_table()
+        # get model table
+        model_table = self.trained_model_table().model_table()
+        # get functions and hashes
+        dataset_fn, dataset_hash, model_fn, model_hash, seed = (
+            (self.trained_model_table & key)
+            .fetch1('dataset_fn', 'dataset_hash', 'model_fn', 'model_hash', 'seed')
+        )
+        dataset_config = (
+            (dataset_table & f'dataset_hash="{dataset_hash}"')
+            .fetch1('dataset_config')
+        )
+        # get model config
+        model_config = (
+            (model_table & f'model_hash="{model_hash}"')
+            .fetch1('model_config')
+        )
+        # build model
+        model_fn = resolve_fn(model_fn, default_base='model')
+        model = model_fn(None, seed, **model_config)
+        # build dataloader
+        dataset_fn = resolve_fn(dataset_fn, default_base='dataset')
+        dataloaders = dataset_fn(seed, **dataset_config)
+
+        return dataloaders, model
+
     def make(self, key):
-        dataloaders, model = self.model_loader.load(key=key)
+        dataloaders, model = self.get_dataloader_model(key)
         model.eval().cuda()
         seed = (self.seed_table() & key).fetch1("mei_seed")
         image = torch.from_numpy((self.image_table & key).fetch1("image"))
@@ -304,87 +361,87 @@ class Reconstruction(mixins.MEITemplateMixin, dj.Computed):
         
         
 
-@schema
-class ReconstructionTransfer(mixins.MEITemplateMixin, dj.Computed):
-    definition = """
-    # contains maximally exciting images (MEIs)
-    -> self.method_table
-    -> self.trained_model_table
-    -> self.selector_table
-    -> self.image_table
-    -> self.seed_table
-    ---
-    mei                 : attach@minio  # the MEI as a tensor
-    score               : float         # some score depending on the used method function
-    output              : attach@minio  # object returned by the method function
-    """
-
-    trained_model_table = TrainedTransferModel
-    selector_table = ReconObjective
-    target_fn_table = ReconTargetFunction
-    target_unit_table = ReconTargetUnit
-    method_table = ReconMethod
-    image_table = ReconstructionImages
-    seed_table = ReconSeed
-    storage = "minio"
-    database = ""  # hack to supress DJ error
-
-    class Responses(dj.Part):
-        @property
-        def definition(self):
-            definition = """
-            # Contains the models state dict, stored externally.
-            -> master
-            ---
-            original_responses:                 attach@{storage}
-            reconstructed_responses:            attach@{storage}
-            """.format(
-                storage=self._master.storage
-            )
-            return definition
-
-    def get_model_responses(self, model, image, device="cuda"):
-        with torch.no_grad():
-            responses = model(
-                image.to(device),
-            )
-        return responses
-
-    def _insert_responses(self, response_entity: Dict[str, Any]) -> None:
-        """Saves the MEI to a temporary directory and inserts the prepared entity into the table."""
-        with self.get_temp_dir() as temp_dir:
-            for name in ("original_responses", "reconstructed_responses"):
-                self._save_to_disk(response_entity, temp_dir, name)
-            self.Responses.insert1(response_entity, ignore_extra_fields=True)
-
-    def make(self, key):
-        dataloaders, model = self.model_loader.load(key=key)
-        model.eval().cuda()
-        seed = (self.seed_table() & key).fetch1("mei_seed")
-        image = torch.from_numpy((self.image_table & key).fetch1("image"))
-        if image.shape[1] ==1:
-            image = image.repeat(1,3,1,1)
-        wrapper = self.target_unit_table().get_wrapper(key, model)
-        responses = self.get_model_responses(wrapper, image)
-        target_fn = (self.target_fn_table & key).get_target_fn(responses=responses)
-        output_selected_model = self.selector_table().get_output_selected_model(
-            model=wrapper, target_fn=target_fn
-        )
-
-        mei_entity = self.method_table().generate_mei(
-            dataloaders, output_selected_model, key, seed
-        )
-
-        reconstructed_image = mei_entity["mei"]
-        reconstructed_responses = self.get_model_responses(
-            model=wrapper,
-            image=reconstructed_image,
-        )
-        response_entity = dict(
-            original_responses=responses,
-            reconstructed_responses=reconstructed_responses,
-        )
-
-        self._insert_mei(mei_entity)
-        mei_entity.update(response_entity)
-        self._insert_responses(mei_entity)
+#@schema
+#class ReconstructionTransfer(mixins.MEITemplateMixin, dj.Computed):
+#    definition = """
+#    # contains maximally exciting images (MEIs)
+#    -> self.method_table
+#    -> self.trained_model_table
+#    -> self.selector_table
+#    -> self.image_table
+#    -> self.seed_table
+#    ---
+#    mei                 : attach@minio  # the MEI as a tensor
+#    score               : float         # some score depending on the used method function
+#    output              : attach@minio  # object returned by the method function
+#    """
+#
+#    trained_model_table = TrainedTransferModel
+#    selector_table = ReconObjective
+#    target_fn_table = ReconTargetFunction
+#    target_unit_table = ReconTargetUnit
+#    method_table = ReconMethod
+#    image_table = ReconstructionImages
+#    seed_table = ReconSeed
+#    storage = "minio"
+#    database = ""  # hack to supress DJ error
+#
+#    class Responses(dj.Part):
+#        @property
+#        def definition(self):
+#            definition = """
+#            # Contains the models state dict, stored externally.
+#            -> master
+#            ---
+#            original_responses:                 attach@{storage}
+#            reconstructed_responses:            attach@{storage}
+#            """.format(
+#                storage=self._master.storage
+#            )
+#            return definition
+#
+#    def get_model_responses(self, model, image, device="cuda"):
+#        with torch.no_grad():
+#            responses = model(
+#                image.to(device),
+#            )
+#        return responses
+#
+#    def _insert_responses(self, response_entity: Dict[str, Any]) -> None:
+#        """Saves the MEI to a temporary directory and inserts the prepared entity into the table."""
+#        with self.get_temp_dir() as temp_dir:
+#            for name in ("original_responses", "reconstructed_responses"):
+#                self._save_to_disk(response_entity, temp_dir, name)
+#            self.Responses.insert1(response_entity, ignore_extra_fields=True)
+#
+#    def make(self, key):
+#        dataloaders, model = self.model_loader.load(key=key)
+#        model.eval().cuda()
+#        seed = (self.seed_table() & key).fetch1("mei_seed")
+#        image = torch.from_numpy((self.image_table & key).fetch1("image"))
+#        if image.shape[1] ==1:
+#            image = image.repeat(1,3,1,1)
+#        wrapper = self.target_unit_table().get_wrapper(key, model)
+#        responses = self.get_model_responses(wrapper, image)
+#        target_fn = (self.target_fn_table & key).get_target_fn(responses=responses)
+#        output_selected_model = self.selector_table().get_output_selected_model(
+#            model=wrapper, target_fn=target_fn
+#        )
+#
+#        mei_entity = self.method_table().generate_mei(
+#            dataloaders, output_selected_model, key, seed
+#        )
+#
+#        reconstructed_image = mei_entity["mei"]
+#        reconstructed_responses = self.get_model_responses(
+#            model=wrapper,
+#            image=reconstructed_image,
+#        )
+#        response_entity = dict(
+#            original_responses=responses,
+#            reconstructed_responses=reconstructed_responses,
+#        )
+#
+#        self._insert_mei(mei_entity)
+#        mei_entity.update(response_entity)
+#        self._insert_responses(mei_entity)
