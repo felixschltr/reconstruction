@@ -26,7 +26,7 @@ from mei.import_helpers import import_object
 from ..modules.reducers import ConstrainedOutputModel
 
 
-schema = CustomSchema(dj.config.get("schema_name", "nnfabrik_core"))
+#schema = CustomSchema(dj.config.get("schema_name", "nnfabrik_core"))
 resolve_target_fn = partial(resolve_fn, default_base="targets")
 
 
@@ -78,6 +78,33 @@ class ReconMethod(mixins.MEIMethodMixin, dj.Lookup):
                     if "key" in v["kwargs"]:
                         v["kwargs"]["key"] = key
 
+@schema
+class ReconMethodParameters(dj.Computed):
+    definition = """
+    -> ReconMethod
+    ---
+    lr: float   # list all the parameters here that are of interest
+    norm: float
+    sigma: float
+    n_iter: float
+    optimizer: varchar(64)
+    precondition: varchar(64) 
+    """
+    
+    def make(self, key):
+        
+        # get the config
+        method_config = (ReconMethod & key).fetch1("method_config")
+        
+        # get all the attributes
+        key["norm"] = method_config.get("postprocessing").get("kwargs").get("norm")
+        key["lr"] = method_config.get("optimizer").get("kwargs").get("lr")
+        key["n_iter"] = method_config.get("stopper").get("kwargs").get("num_iterations")
+        key["sigma"] = method_config.get("precondition").get("kwargs").get("sigma")
+        key["optimizer"] = method_config.get("optimizer").get("path")
+        key["precondition"] = method_config.get("precondition").get("path")
+        
+        self.insert1(key, ignore_extra_fields=True)
 @schema
 class ReconTargetFunction(dj.Manual):
     definition = """
