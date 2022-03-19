@@ -88,7 +88,8 @@ class ReconMethodParameters(dj.Computed):
     sigma: float
     n_iter: float
     optimizer: varchar(64)
-    precondition: varchar(64) 
+    precondition: varchar(64)
+    postprocessing: varchar(64)
     """
     
     def make(self, key):
@@ -103,6 +104,7 @@ class ReconMethodParameters(dj.Computed):
         key["sigma"] = method_config.get("precondition").get("kwargs").get("sigma")
         key["optimizer"] = method_config.get("optimizer").get("path")
         key["precondition"] = method_config.get("precondition").get("path")
+        key["postprocessing"] = method_config.get("postprocessing").get("path")
         
         self.insert1(key, ignore_extra_fields=True)
 @schema
