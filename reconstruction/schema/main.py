@@ -1,4 +1,8 @@
 from __future__ import annotations
+import os
+import time
+import numpy as np
+from PIL import Image
 import warnings
 from functools import partial
 from typing import Dict, Any, Callable, List
@@ -18,7 +22,8 @@ from nnfabrik.utility.dj_helpers import CustomSchema, make_hash, cleanup_numpy_s
 #from bias_transfer.tables.trained_model import *
 #from bias_transfer.tables.trained_transfer_model import *
 
-from reconstructing_robustness.dj_tables.nnfabrik import *
+from reconstructing_robustness.dj_tables.nnfabrik import Model, TrainedModel
+from reconstructing_robustness.dataset import DATASET_NAMES, C_SUBCATS, get_transforms
 
 from mei import mixins
 from mei.import_helpers import import_object
@@ -26,7 +31,7 @@ from mei.import_helpers import import_object
 from ..modules.reducers import ConstrainedOutputModel
 
 
-#schema = CustomSchema(dj.config.get("schema_name", "nnfabrik_core"))
+schema = CustomSchema(dj.config.get("reconstruction_schema", "nnfabrik_core"))
 resolve_target_fn = partial(resolve_fn, default_base="targets")
 
 
@@ -40,11 +45,94 @@ class ReconstructionImages(dj.Manual):
     definition = """
       # images for reconstruction
       img_id:    int                  # unique id
-      img_class: varchar(64)          # image type descriptor
+      img_path: varchar(128)          # image path
+      dataset: varchar(64)            # dataset namec
+      corruption: varchar(64)         # corruption subcategory
+      severity: int                   # corruption severtiy [0-5]
+      img_hash: varchar(64)           # image hash
       ---
       image: longblob                 # actual image as numpy array
+      norm: float                     # norm of the image
+      img_comment: varchar(64) 
       """
+ 
 
+    def add_entry(
+        self,
+        img_id: int,
+        img_path: str,
+        dataset: str,
+        corruption :str,
+        severity: int,
+        img_comment: str,
+        skip_duplicates=False
+    ):
+        key = {}
+
+        key['img_id'] = img_id
+        key['img_comment'] = img_comment
+
+        if not os.path.exists(img_path):
+            raise FileNotFoundError(f'{img_path} does not exist.')
+        else: 
+            key['img_path'] = img_path
+        
+        if not dataset in DATASET_NAMES:
+            raise ValueError(f'dataset must be one of {DATASET_NAMES}.')
+        else:
+            key['dataset'] = dataset
+        
+        c_subcategories = []
+        for c in C_SUBCATS.keys():
+            c_subcategories += C_SUBCATS[c]
+        # add empty string to represent clean ImageNet validation set
+        c_subcategories += ['']
+        if not corruption in c_subcategories:
+            raise ValueError(f'corruption must be one of {c_subcategories}.')
+        elif corruption == '' and dataset == DATASET_NAMES[1]: # ImageNet-C
+            raise ValueError(f'corruption does not match dataset {DATASET_NAMES[1]}.')
+        elif corruption != '' and dataset == DATASET_NAMES[0]: # ImageNet
+            raise ValueError(f'corruption does not match {DATASET_NAMES[0]}.')
+        else: 
+            key['corruption'] = corruption
+
+        # severtiy zero represents clean ImageNet validation set
+        valid_severities = [i for i in range(6)]
+        if not severity in valid_severities:
+            raise ValueError(f'severity must be one of {valid_severities}.')
+        elif severity == 0 and dataset == DATASET_NAMES[1]: # ImageNet-C
+            raise ValueError(f'severity 0 does not match dataset {DATASET_NAMES[1]}.')
+        elif severity > 0 and dataset == DATASET_NAMES[0]: # ImageNet
+            raise ValueError(f'severity > 0 does not match dataset {DATASET_NAMES[0]}.')
+        else:
+            key['severity'] = severity
+        
+        key['img_hash'] = make_hash(
+            [img_id, img_path, dataset, corruption, severity]
+            )
+
+        # add image 
+        image = Image.open(img_path).convert('RGB')
+        t = get_transforms(dataset)
+        image = t(image).numpy()
+        image = image[None, :]
+        key['image'] = image
+
+        # add nomrm
+        key['norm'] = np.linalg.norm(image)
+
+        # insert key
+        existing = self.proj() & key
+        if existing:
+            if skip_duplicates:
+                warnings.warn("Corresponding entry found. Skipping...")
+                key = (self & (existing)).fetch1()
+            else:
+                raise ValueError("Corresponding entry already exists")
+        else:
+            self.insert1(key)
+
+        return key
 
 #@schema
 #class ReconMethod(mixins.MEIMethodMixin, dj.Lookup):
@@ -107,6 +195,7 @@ class ReconMethodParameters(dj.Computed):
         key["postprocessing"] = method_config.get("postprocessing").get("path")
         
         self.insert1(key, ignore_extra_fields=True)
+
 @schema
 class ReconTargetFunction(dj.Manual):
     definition = """
@@ -327,39 +416,14 @@ class Reconstruction(mixins.MEITemplateMixin, dj.Computed):
                 self._save_to_disk(response_entity, temp_dir, name)
             self.Responses.insert1(response_entity, ignore_extra_fields=True)
 
-    def get_dataloader_model(self, key):
-        # get dataset table
-        dataset_table = self.trained_model_table().dataset_table()
-        # get model table
-        model_table = self.trained_model_table().model_table()
-        # get functions and hashes
-        dataset_fn, dataset_hash, model_fn, model_hash, seed = (
-            (self.trained_model_table & key)
-            .fetch1('dataset_fn', 'dataset_hash', 'model_fn', 'model_hash', 'seed')
-        )
-        dataset_config = (
-            (dataset_table & f'dataset_hash="{dataset_hash}"')
-            .fetch1('dataset_config')
-        )
-        # get model config
-        model_config = (
-            (model_table & f'model_hash="{model_hash}"')
-            .fetch1('model_config')
-        )
-        # build model
-        model_fn = resolve_fn(model_fn, default_base='model')
-        model = model_fn(None, seed, **model_config)
-        # build dataloader
-        dataset_fn = resolve_fn(dataset_fn, default_base='dataset')
-        dataloaders = dataset_fn(seed, **dataset_config)
-
-        return dataloaders, model
-
     def make(self, key):
-        dataloaders, model = self.get_dataloader_model(key)
+        
+        start = time.time()
+
+        dataloaders, model = self.model_loader.load(key=key)
         model.eval().cuda()
         seed = (self.seed_table() & key).fetch1("mei_seed")
-        image = torch.from_numpy((self.image_table & key).fetch1("image"))
+        image = torch.from_numpy((self.image_table & key).fetch1("image").copy())
         if image.shape[1] ==1:
             image = image.repeat(1,3,1,1)
         wrapper = self.target_unit_table().get_wrapper(key, model)
@@ -386,6 +450,10 @@ class Reconstruction(mixins.MEITemplateMixin, dj.Computed):
         self._insert_mei(mei_entity)
         mei_entity.update(response_entity)
         self._insert_responses(mei_entity)
+
+        end = time.time()
+        elapsed = time.gmtime(end-start)
+        print(f'reconstruction took {elapsed.tm_min} min {elapsed.tm_sec} sec')
 
         
         
