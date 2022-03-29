@@ -172,7 +172,7 @@ class ReconMethodParameters(dj.Computed):
     -> ReconMethod
     ---
     lr: float   # list all the parameters here that are of interest
-    norm: float
+    norm_fraction: float    # fraction of full image norm
     sigma: float
     n_iter: float
     optimizer: varchar(64)
@@ -186,7 +186,7 @@ class ReconMethodParameters(dj.Computed):
         method_config = (ReconMethod & key).fetch1("method_config")
         
         # get all the attributes
-        key["norm"] = method_config.get("postprocessing").get("kwargs").get("norm")
+        key["norm_fraction"] = method_config.get("postprocessing").get("kwargs").get("norm_fraction")
         key["lr"] = method_config.get("optimizer").get("kwargs").get("lr")
         key["n_iter"] = method_config.get("stopper").get("kwargs").get("num_iterations")
         key["sigma"] = method_config.get("precondition").get("kwargs").get("sigma")

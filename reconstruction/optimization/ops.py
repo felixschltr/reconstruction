@@ -1,6 +1,9 @@
 import torch
 from mei.legacy.utils import varargin
 
+from reconstructing_robustness.utils.reconstruction_utils import img_to_zspace
+from reconstruction.reconstruction.schema.main import ReconstructionImages
+
 
 class ChangeNormConditional:
     """ Change the norm of the input.
@@ -27,10 +30,10 @@ class ChangeNormAndClip:
             x.
     """
 
-    def __init__(self, norm, x_min, x_max):
-        self.norm = norm
-        self.x_min = x_min
-        self.x_max = x_max
+    def __init__(self, key, norm_fraction):
+        img, norm =(ReconstructionImages() & key).fetch1('image', 'norm')
+        self.norm = norm_fraction * norm
+        self.x_min, self.x_max = img_to_zspace(img)
 
     @varargin
     def __call__(self, x, iteration=None):
