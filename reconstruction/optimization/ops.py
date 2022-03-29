@@ -2,7 +2,7 @@ import torch
 from mei.legacy.utils import varargin
 
 from reconstructing_robustness.utils.reconstruction_utils import img_to_zspace
-from reconstruction.reconstruction.schema.main import ReconstructionImages
+from reconstruction.schema.main import ReconstructionImages
 
 
 class ChangeNormConditional:
