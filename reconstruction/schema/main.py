@@ -24,6 +24,7 @@ from nnfabrik.utility.dj_helpers import CustomSchema, make_hash, cleanup_numpy_s
 
 from reconstructing_robustness.dj_tables.nnfabrik import Model, TrainedModel
 from reconstructing_robustness.dataset import DATASET_NAMES, C_SUBCATS, get_transforms
+from reconstructing_robustness.utils.reconstruction_utils import get_imagenet_classes, get_class_by_folder, get_class_by_img_path
 
 from mei import mixins
 from mei.import_helpers import import_object
@@ -35,6 +36,7 @@ schema = CustomSchema(dj.config.get("reconstruction_schema", "nnfabrik_core"))
 resolve_target_fn = partial(resolve_fn, default_base="targets")
 
 
+DATADIR = '/data/fetched_from_attach'
 @schema
 class ReconSeed(mixins.MEISeedMixin, dj.Lookup):
     """Seed table for MEI method."""
@@ -455,8 +457,38 @@ class Reconstruction(mixins.MEITemplateMixin, dj.Computed):
         elapsed = time.gmtime(end-start)
         print(f'reconstruction took {elapsed.tm_min} min {elapsed.tm_sec} sec')
 
-        
-        
+@schema
+class ReconClassification(dj.Computed):
+    definition = """
+        ->Reconstruction
+        ->Model.proj(evaluator_model_fn='model_fn', evaluator_model_hash='model_hash')
+        ---
+        classification: int # the predicted class
+        correct: tinyint # 0/1 if it's the correct label
+        """
+
+    def make(self, key):
+    # load reconstruction, load model, get classification
+
+
+        # get true class of original image
+        img_path = (Reconstruction().image_table() & key).fetch1('img_path')
+        true_class = get_class_by_img_path(img_path)
+        # get (normlized) mei as torch tensor
+        mei = (Reconstruction() & key).fetch1(
+            'mei',
+            download_path=DATADIR
+            )
+        mei = torch.load(mei)
+        # get model
+        dataloader, model = Reconstruction().model_loader.load(key)
+        # get model prediction
+        model.eval()
+        logits = model(mei)
+        predicted_class = logits.argmax(dim=1, keepdim=True)
+        # add table entry
+        key['classifcation'] = predicted_class.item()
+        key['correct'] = (1 if predicted_class.item() == true_class else 0)
 
 #@schema
 #class ReconstructionTransfer(mixins.MEITemplateMixin, dj.Computed):
