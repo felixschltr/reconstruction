@@ -22,6 +22,7 @@ from nnfabrik.utility.dj_helpers import CustomSchema, make_hash, cleanup_numpy_s
 #from bias_transfer.tables.trained_model import *
 #from bias_transfer.tables.trained_transfer_model import *
 
+from reconstructing_robustness.model import model_fn
 from reconstructing_robustness.dj_tables.nnfabrik import Model, TrainedModel
 from reconstructing_robustness.dataset import DATASET_NAMES, C_SUBCATS, get_transforms
 from reconstructing_robustness.utils.reconstruction_utils import get_imagenet_classes, get_class_by_folder, get_class_by_img_path
@@ -84,9 +85,7 @@ class ReconstructionImages(dj.Manual):
         else:
             key['dataset'] = dataset
         
-        c_subcategories = []
-        for c in C_SUBCATS.keys():
-            c_subcategories += C_SUBCATS[c]
+        c_subcategories = sum(C_SUBCATS.values(), [])
         # add empty string to represent clean ImageNet validation set
         c_subcategories += ['']
         if not corruption in c_subcategories:
@@ -115,7 +114,7 @@ class ReconstructionImages(dj.Manual):
 
         # add image 
         image = Image.open(img_path).convert('RGB')
-        t = get_transforms(dataset)
+        t = get_transforms(dataset) # transform image according to dataset
         image = t(image).numpy()
         image = image[None, :]
         key['image'] = image
@@ -434,12 +433,16 @@ class Reconstruction(mixins.MEITemplateMixin, dj.Computed):
         output_selected_model = self.selector_table().get_output_selected_model(
             model=wrapper, target_fn=target_fn
         )
+        # ping DB to prevent LostConnectionError
+        self.connection.ping()
 
+        print('Starting to generate MEI...')
         mei_entity = self.method_table().generate_mei(
             dataloaders, output_selected_model, key, seed
         )
 
         reconstructed_image = mei_entity["mei"]
+        print('Getting model actiovations in resp. to MEI...')
         reconstructed_responses = self.get_model_responses(
             model=wrapper,
             image=reconstructed_image,
@@ -470,25 +473,44 @@ class ReconClassification(dj.Computed):
     def make(self, key):
     # load reconstruction, load model, get classification
 
+        start = time.time()
 
         # get true class of original image
         img_path = (Reconstruction().image_table() & key).fetch1('img_path')
-        true_class = get_class_by_img_path(img_path)
+        true_class_info = get_class_by_img_path(img_path)
+        true_class = true_class_info[1]
+        assert isinstance(true_class, int)
         # get (normlized) mei as torch tensor
         mei = (Reconstruction() & key).fetch1(
             'mei',
             download_path=DATADIR
             )
         mei = torch.load(mei)
-        # get model
-        dataloader, model = Reconstruction().model_loader.load(key)
+        # get model and evaluate
+        eval_model_restr = dict(model_hash=key['evaluator_model_hash'])
+        model_config, model_comment = (
+            (Reconstruction().trained_model_table().model_table() & eval_model_restr)
+            .fetch1('model_config', 'model_comment')
+        )
+        seed = (Reconstruction().trained_model_table() & eval_model_restr).fetch1('seed')
+        model = model_fn({}, seed, **model_config)
+        print(f'Model: {model_comment}')
         # get model prediction
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        model = model.to(device)
+        mei = mei.to(device)
         model.eval()
         logits = model(mei)
         predicted_class = logits.argmax(dim=1, keepdim=True)
         # add table entry
-        key['classifcation'] = predicted_class.item()
+        key['classification'] = predicted_class.item()
         key['correct'] = (1 if predicted_class.item() == true_class else 0)
+        self.insert1(key)
+
+        end = time.time()
+        elapsed = time.gmtime(end-start)
+        print(f'classification took {elapsed.tm_min} min {elapsed.tm_sec} sec')
+
 
 #@schema
 #class ReconstructionTransfer(mixins.MEITemplateMixin, dj.Computed):
