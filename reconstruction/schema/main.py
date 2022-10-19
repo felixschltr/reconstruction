@@ -25,7 +25,7 @@ from nnfabrik.utility.dj_helpers import CustomSchema, make_hash, cleanup_numpy_s
 from reconstructing_robustness.model import model_fn
 from reconstructing_robustness.dj_tables.nnfabrik import Model, TrainedModel
 from reconstructing_robustness.dataset import DATASET_NAMES, C_SUBCATS, get_transforms
-from reconstructing_robustness.utils.reconstruction_utils import get_imagenet_classes, get_class_by_folder, get_class_by_img_path
+from reconstructing_robustness.utils.reconstruction_utils import get_imagenet_classes, get_class_by_folder, get_class_by_img_path, rescale_mei_in_zspace
 
 from mei import mixins
 from mei.import_helpers import import_object
@@ -500,8 +500,9 @@ class ReconClassification(dj.Computed):
         model = model.to(device)
         mei = mei.to(device)
         model.eval()
-        logits = model(mei)
-        predicted_class = logits.argmax(dim=1, keepdim=True)
+        with torch.no_grad():
+            logits = model(mei)
+            predicted_class = logits.argmax(dim=1, keepdim=True)
         # add table entry
         key['classification'] = predicted_class.item()
         key['correct'] = (1 if predicted_class.item() == true_class else 0)
@@ -509,7 +510,69 @@ class ReconClassification(dj.Computed):
 
         end = time.time()
         elapsed = time.gmtime(end-start)
-        print(f'classification took {elapsed.tm_min} min {elapsed.tm_sec} sec')
+        print(f'Classification took {elapsed.tm_min} min {elapsed.tm_sec} sec')
+
+@schema
+class ReconClassificationRescaled(dj.Computed):
+    definition = """
+        # Contains classification results of re-scaled reconstructions/MEIs
+        ->Reconstruction
+        ->Model.proj(evaluator_model_fn='model_fn', evaluator_model_hash='model_hash')
+        ---
+        norm_rescaled: float # norm of the re-scaled MEI in z-space (normalized)
+        classification: int # the predicted class
+        correct: tinyint # 0/1 if it's the correct label
+        """
+
+    def make(self, key):
+    # load reconstruction, load model, get classification
+
+        start = time.time()
+
+        # get true class of original image
+        img_path, norm_fraction = (
+            Reconstruction() *
+            ReconMethodParameters() &
+            key
+        ).fetch1('img_path', 'norm_fraction')
+        true_class_info = get_class_by_img_path(img_path)
+        true_class = true_class_info[1]
+        assert isinstance(true_class, int)
+        # get (normlized) mei as torch tensor
+        mei = (Reconstruction() & key).fetch1(
+            'mei',
+            download_path=DATADIR
+            )
+        mei = torch.load(mei)
+        # if norm_fraction is not full norm, re-scale mei
+        if norm_fraction < 1.:
+            mei = rescale_mei_in_zspace(mei)
+        # get model and evaluate
+        eval_model_restr = dict(model_hash=key['evaluator_model_hash'])
+        model_config, model_comment = (
+            (Reconstruction().trained_model_table().model_table() & eval_model_restr)
+            .fetch1('model_config', 'model_comment')
+        )
+        seed = (Reconstruction().trained_model_table() & eval_model_restr).fetch1('seed')
+        model = model_fn({}, seed, **model_config)
+        print(f'Model: {model_comment}')
+        # get model prediction
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        model = model.to(device)
+        mei = mei.to(device)
+        model.eval()
+        with torch.no_grad():
+            logits = model(mei)
+            predicted_class = logits.argmax(dim=1, keepdim=True)
+        # add table entry
+        key['norm_rescaled'] = np.linalg.norm(mei.detach().cpu())
+        key['classification'] = predicted_class.item()
+        key['correct'] = (1 if predicted_class.item() == true_class else 0)
+        self.insert1(key)
+
+        end = time.time()
+        elapsed = time.gmtime(end-start)
+        print(f'Classification took {elapsed.tm_min} min {elapsed.tm_sec} sec')
 
 
 #@schema
