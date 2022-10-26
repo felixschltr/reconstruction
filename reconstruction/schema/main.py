@@ -1,13 +1,14 @@
 from __future__ import annotations
+
 import os
 import time
-import numpy as np
-from PIL import Image
 import warnings
 from functools import partial
-from typing import Dict, Any, Callable, List
+from typing import Any, Callable, Dict, List
 
+import numpy as np
 import torch
+from PIL import Image
 from torch.nn import Module
 from torch.utils.data import DataLoader
 
@@ -15,29 +16,32 @@ Key = Dict[str, Any]
 Dataloaders = Dict[str, DataLoader]
 
 import datajoint as dj
-from nnfabrik.main import Dataset
-from nnfabrik.builder import resolve_fn
-from nnfabrik.utility.dj_helpers import CustomSchema, make_hash, cleanup_numpy_scalar
-
-#from bias_transfer.tables.trained_model import *
-#from bias_transfer.tables.trained_transfer_model import *
-
-from reconstructing_robustness.model import model_fn
-from reconstructing_robustness.dj_tables.nnfabrik import Model, TrainedModel
-from reconstructing_robustness.dataset import DATASET_NAMES, C_SUBCATS, get_transforms
-from reconstructing_robustness.utils.reconstruction_utils import get_imagenet_classes, get_class_by_folder, get_class_by_img_path, rescale_mei_in_zspace
-
 from mei import mixins
 from mei.import_helpers import import_object
+from nnfabrik.builder import resolve_fn
+from nnfabrik.main import Dataset
+from nnfabrik.utility.dj_helpers import CustomSchema, cleanup_numpy_scalar, make_hash
+from reconstructing_robustness.dataset import C_SUBCATS, DATASET_NAMES, get_transforms
+from reconstructing_robustness.dj_tables.nnfabrik import TrainedModel
+from reconstructing_robustness.model import model_fn
+from reconstructing_robustness.utils.reconstruction_utils import (
+    get_class_by_img_path,
+    rescale_mei_in_zspace,
+)
 
 from ..modules.reducers import ConstrainedOutputModel
+
+# from bias_transfer.tables.trained_model import *
+# from bias_transfer.tables.trained_transfer_model import *
 
 
 schema = CustomSchema(dj.config.get("reconstruction_schema", "nnfabrik_core"))
 resolve_target_fn = partial(resolve_fn, default_base="targets")
 
 
-DATADIR = '/data/fetched_from_attach'
+DATADIR = "/data/fetched_from_attach"
+
+
 @schema
 class ReconSeed(mixins.MEISeedMixin, dj.Lookup):
     """Seed table for MEI method."""
@@ -58,69 +62,66 @@ class ReconstructionImages(dj.Manual):
       norm: float                     # norm of the image
       img_comment: varchar(64) 
       """
- 
 
     def add_entry(
         self,
         img_id: int,
         img_path: str,
         dataset: str,
-        corruption :str,
+        corruption: str,
         severity: int,
         img_comment: str,
-        skip_duplicates=False
+        skip_duplicates=False,
     ):
         key = {}
 
-        key['img_id'] = img_id
-        key['img_comment'] = img_comment
+        key["img_id"] = img_id
+        key["img_comment"] = img_comment
 
         if not os.path.exists(img_path):
-            raise FileNotFoundError(f'{img_path} does not exist.')
-        else: 
-            key['img_path'] = img_path
-        
-        if not dataset in DATASET_NAMES:
-            raise ValueError(f'dataset must be one of {DATASET_NAMES}.')
+            raise FileNotFoundError(f"{img_path} does not exist.")
         else:
-            key['dataset'] = dataset
-        
+            key["img_path"] = img_path
+
+        if not dataset in DATASET_NAMES:
+            raise ValueError(f"dataset must be one of {DATASET_NAMES}.")
+        else:
+            key["dataset"] = dataset
+
         c_subcategories = sum(C_SUBCATS.values(), [])
         # add empty string to represent clean ImageNet validation set
-        c_subcategories += ['']
+        c_subcategories += [""]
         if not corruption in c_subcategories:
-            raise ValueError(f'corruption must be one of {c_subcategories}.')
-        elif corruption == '' and dataset == DATASET_NAMES[1]: # ImageNet-C
-            raise ValueError(f'corruption does not match dataset {DATASET_NAMES[1]}.')
-        elif corruption != '' and dataset == DATASET_NAMES[0]: # ImageNet
-            raise ValueError(f'corruption does not match {DATASET_NAMES[0]}.')
-        else: 
-            key['corruption'] = corruption
+            raise ValueError(f"corruption must be one of {c_subcategories}.")
+        elif corruption == "" and dataset == DATASET_NAMES[1]:  # ImageNet-C
+            raise ValueError(f"corruption does not match dataset {DATASET_NAMES[1]}.")
+        elif corruption != "" and dataset == DATASET_NAMES[0]:  # ImageNet
+            raise ValueError(f"corruption does not match {DATASET_NAMES[0]}.")
+        else:
+            key["corruption"] = corruption
 
         # severtiy zero represents clean ImageNet validation set
         valid_severities = [i for i in range(6)]
         if not severity in valid_severities:
-            raise ValueError(f'severity must be one of {valid_severities}.')
-        elif severity == 0 and dataset == DATASET_NAMES[1]: # ImageNet-C
-            raise ValueError(f'severity 0 does not match dataset {DATASET_NAMES[1]}.')
-        elif severity > 0 and dataset == DATASET_NAMES[0]: # ImageNet
-            raise ValueError(f'severity > 0 does not match dataset {DATASET_NAMES[0]}.')
+            raise ValueError(f"severity must be one of {valid_severities}.")
+        elif severity == 0 and dataset == DATASET_NAMES[1]:  # ImageNet-C
+            raise ValueError(f"severity 0 does not match dataset {DATASET_NAMES[1]}.")
+        elif severity > 0 and dataset == DATASET_NAMES[0]:  # ImageNet
+            raise ValueError(f"severity > 0 does not match dataset {DATASET_NAMES[0]}.")
         else:
-            key['severity'] = severity
-        
-        key['img_hash'] = make_hash(
-            [img_id, img_path, dataset, corruption, severity]
-            )
+            key["severity"] = severity
 
-        # add image 
-        image = Image.open(img_path).convert('RGB')
-        t = get_transforms(dataset) # transform image according to dataset
+        key["img_hash"] = make_hash([img_id, img_path, dataset, corruption, severity])
+
+        # add image
+        image = Image.open(img_path).convert("RGB")
+        t = get_transforms(dataset)  # transform image according to dataset
         image = t(image).numpy()
         image = image[None, :]
-        key['image'] = image
+        key["image"] = image
 
         # add nomrm
-        key['norm'] = np.linalg.norm(image)
+        key["norm"] = np.linalg.norm(image)
 
         # insert key
         existing = self.proj() & key
@@ -135,9 +136,6 @@ class ReconstructionImages(dj.Manual):
 
         return key
 
-#@schema
-#class ReconMethod(mixins.MEIMethodMixin, dj.Lookup):
-#    seed_table = ReconSeed
 
 @schema
 class ReconMethod(mixins.MEIMethodMixin, dj.Lookup):
@@ -167,6 +165,7 @@ class ReconMethod(mixins.MEIMethodMixin, dj.Lookup):
                     if "key" in v["kwargs"]:
                         v["kwargs"]["key"] = key
 
+
 @schema
 class ReconMethodParameters(dj.Computed):
     definition = """
@@ -180,22 +179,25 @@ class ReconMethodParameters(dj.Computed):
     precondition: varchar(64)
     postprocessing: varchar(64)
     """
-    
+
     def make(self, key):
-        
+
         # get the config
         method_config = (ReconMethod & key).fetch1("method_config")
-        
+
         # get all the attributes
-        key["norm_fraction"] = method_config.get("postprocessing").get("kwargs").get("norm_fraction")
+        key["norm_fraction"] = (
+            method_config.get("postprocessing").get("kwargs").get("norm_fraction")
+        )
         key["lr"] = method_config.get("optimizer").get("kwargs").get("lr")
         key["n_iter"] = method_config.get("stopper").get("kwargs").get("num_iterations")
         key["sigma"] = method_config.get("precondition").get("kwargs").get("sigma")
         key["optimizer"] = method_config.get("optimizer").get("path")
         key["precondition"] = method_config.get("precondition").get("path")
         key["postprocessing"] = method_config.get("postprocessing").get("path")
-        
+
         self.insert1(key, ignore_extra_fields=True)
+
 
 @schema
 class ReconTargetFunction(dj.Manual):
@@ -329,6 +331,33 @@ class ReconTargetUnit(dj.Manual):
 
 
 @schema
+class ReconTargetUnitParameters(dj.Computed):
+    definition = """
+    -> ReconTargetUnit
+    ---
+    return_layer: varchar(64)
+    """
+
+    def make(self, key):
+        """
+        Add entries 
+
+        Parameters
+        ----------
+        key : _type_
+            _description_
+        """
+
+        unit_config = (ReconTargetUnit & key).fetch1("unit_config")
+
+        ((layer_name, new_layer_name),) = unit_config["return_layers"].items()
+
+        key["return_layer"] = layer_name
+
+        self.insert1(key)
+
+
+@schema
 class ReconObjective(dj.Computed):
     target_fn_table = ReconTargetFunction
     target_unit_table = ReconTargetUnit
@@ -353,15 +382,10 @@ class ReconObjective(dj.Computed):
         self.insert1(key)
 
     def get_output_selected_model(
-        self,
-        model: Module,
-        target_fn: Callable,
+        self, model: Module, target_fn: Callable,
     ) -> constrained_output_model:
 
-        return self.constrained_output_model(
-            model=model,
-            target_fn=target_fn,
-        )
+        return self.constrained_output_model(model=model, target_fn=target_fn,)
 
 
 @schema
@@ -379,7 +403,7 @@ class Reconstruction(mixins.MEITemplateMixin, dj.Computed):
     output              : attach@minio  # object returned by the method function
     """
 
-    trained_model_table = TrainedModel 
+    trained_model_table = TrainedModel
     selector_table = ReconObjective
     target_fn_table = ReconTargetFunction
     target_unit_table = ReconTargetUnit
@@ -405,9 +429,7 @@ class Reconstruction(mixins.MEITemplateMixin, dj.Computed):
 
     def get_model_responses(self, model, image, device="cuda"):
         with torch.no_grad():
-            responses = model(
-                image.to(device),
-            )
+            responses = model(image.to(device),)
         return responses
 
     def _insert_responses(self, response_entity: Dict[str, Any]) -> None:
@@ -418,15 +440,15 @@ class Reconstruction(mixins.MEITemplateMixin, dj.Computed):
             self.Responses.insert1(response_entity, ignore_extra_fields=True)
 
     def make(self, key):
-        
+
         start = time.time()
 
         dataloaders, model = self.model_loader.load(key=key)
         model.eval().cuda()
         seed = (self.seed_table() & key).fetch1("mei_seed")
         image = torch.from_numpy((self.image_table & key).fetch1("image").copy())
-        if image.shape[1] ==1:
-            image = image.repeat(1,3,1,1)
+        if image.shape[1] == 1:
+            image = image.repeat(1, 3, 1, 1)
         wrapper = self.target_unit_table().get_wrapper(key, model)
         responses = self.get_model_responses(wrapper, image)
         target_fn = (self.target_fn_table & key).get_target_fn(responses=responses)
@@ -436,16 +458,15 @@ class Reconstruction(mixins.MEITemplateMixin, dj.Computed):
         # ping DB to prevent LostConnectionError
         self.connection.ping()
 
-        print('Starting to generate MEI...')
+        print("Starting to generate MEI...")
         mei_entity = self.method_table().generate_mei(
             dataloaders, output_selected_model, key, seed
         )
 
         reconstructed_image = mei_entity["mei"]
-        print('Getting model actiovations in resp. to MEI...')
+        print("Getting model actiovations in resp. to MEI...")
         reconstructed_responses = self.get_model_responses(
-            model=wrapper,
-            image=reconstructed_image,
+            model=wrapper, image=reconstructed_image,
         )
         response_entity = dict(
             original_responses=responses,
@@ -457,8 +478,9 @@ class Reconstruction(mixins.MEITemplateMixin, dj.Computed):
         self._insert_responses(mei_entity)
 
         end = time.time()
-        elapsed = time.gmtime(end-start)
-        print(f'reconstruction took {elapsed.tm_min} min {elapsed.tm_sec} sec')
+        elapsed = time.gmtime(end - start)
+        print(f"reconstruction took {elapsed.tm_min} min {elapsed.tm_sec} sec")
+
 
 @schema
 class ReconClassification(dj.Computed):
@@ -471,32 +493,30 @@ class ReconClassification(dj.Computed):
         """
 
     def make(self, key):
-    # load reconstruction, load model, get classification
+        # load reconstruction, load model, get classification
 
         start = time.time()
 
         # get true class of original image
-        img_path = (Reconstruction().image_table() & key).fetch1('img_path')
+        img_path = (Reconstruction().image_table() & key).fetch1("img_path")
         true_class_info = get_class_by_img_path(img_path)
         true_class = true_class_info[1]
         assert isinstance(true_class, int)
         # get (normlized) mei as torch tensor
-        mei = (Reconstruction() & key).fetch1(
-            'mei',
-            download_path=DATADIR
-            )
+        mei = (Reconstruction() & key).fetch1("mei", download_path=DATADIR)
         mei = torch.load(mei)
         # get model and evaluate
-        eval_model_restr = dict(model_hash=key['evaluator_model_hash'])
+        eval_model_restr = dict(model_hash=key["evaluator_model_hash"])
         model_config, model_comment = (
-            (Reconstruction().trained_model_table().model_table() & eval_model_restr)
-            .fetch1('model_config', 'model_comment')
+            Reconstruction().trained_model_table().model_table() & eval_model_restr
+        ).fetch1("model_config", "model_comment")
+        seed = (Reconstruction().trained_model_table() & eval_model_restr).fetch1(
+            "seed"
         )
-        seed = (Reconstruction().trained_model_table() & eval_model_restr).fetch1('seed')
         model = model_fn({}, seed, **model_config)
-        print(f'Model: {model_comment}')
+        print(f"Model: {model_comment}")
         # get model prediction
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        device = "cuda" if torch.cuda.is_available() else "cpu"
         model = model.to(device)
         mei = mei.to(device)
         model.eval()
@@ -504,13 +524,14 @@ class ReconClassification(dj.Computed):
             logits = model(mei)
             predicted_class = logits.argmax(dim=1, keepdim=True)
         # add table entry
-        key['classification'] = predicted_class.item()
-        key['correct'] = (1 if predicted_class.item() == true_class else 0)
+        key["classification"] = predicted_class.item()
+        key["correct"] = 1 if predicted_class.item() == true_class else 0
         self.insert1(key)
 
         end = time.time()
-        elapsed = time.gmtime(end-start)
-        print(f'Classification took {elapsed.tm_min} min {elapsed.tm_sec} sec')
+        elapsed = time.gmtime(end - start)
+        print(f"Classification took {elapsed.tm_min} min {elapsed.tm_sec} sec")
+
 
 @schema
 class ReconClassificationRescaled(dj.Computed):
@@ -525,39 +546,35 @@ class ReconClassificationRescaled(dj.Computed):
         """
 
     def make(self, key):
-    # load reconstruction, load model, get classification
+        # load reconstruction, load model, get classification
 
         start = time.time()
 
         # get true class of original image
         img_path, norm_fraction = (
-            Reconstruction() *
-            ReconMethodParameters() &
-            key
-        ).fetch1('img_path', 'norm_fraction')
+            Reconstruction() * ReconMethodParameters() & key
+        ).fetch1("img_path", "norm_fraction")
         true_class_info = get_class_by_img_path(img_path)
         true_class = true_class_info[1]
         assert isinstance(true_class, int)
         # get (normlized) mei as torch tensor
-        mei = (Reconstruction() & key).fetch1(
-            'mei',
-            download_path=DATADIR
-            )
+        mei = (Reconstruction() & key).fetch1("mei", download_path=DATADIR)
         mei = torch.load(mei)
         # if norm_fraction is not full norm, re-scale mei
-        if norm_fraction < 1.:
+        if norm_fraction < 1.0:
             mei = rescale_mei_in_zspace(mei)
         # get model and evaluate
-        eval_model_restr = dict(model_hash=key['evaluator_model_hash'])
+        eval_model_restr = dict(model_hash=key["evaluator_model_hash"])
         model_config, model_comment = (
-            (Reconstruction().trained_model_table().model_table() & eval_model_restr)
-            .fetch1('model_config', 'model_comment')
+            Reconstruction().trained_model_table().model_table() & eval_model_restr
+        ).fetch1("model_config", "model_comment")
+        seed = (Reconstruction().trained_model_table() & eval_model_restr).fetch1(
+            "seed"
         )
-        seed = (Reconstruction().trained_model_table() & eval_model_restr).fetch1('seed')
         model = model_fn({}, seed, **model_config)
-        print(f'Model: {model_comment}')
+        print(f"Model: {model_comment}")
         # get model prediction
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        device = "cuda" if torch.cuda.is_available() else "cpu"
         model = model.to(device)
         mei = mei.to(device)
         model.eval()
@@ -565,18 +582,18 @@ class ReconClassificationRescaled(dj.Computed):
             logits = model(mei)
             predicted_class = logits.argmax(dim=1, keepdim=True)
         # add table entry
-        key['norm_rescaled'] = np.linalg.norm(mei.detach().cpu())
-        key['classification'] = predicted_class.item()
-        key['correct'] = (1 if predicted_class.item() == true_class else 0)
+        key["norm_rescaled"] = np.linalg.norm(mei.detach().cpu())
+        key["classification"] = predicted_class.item()
+        key["correct"] = 1 if predicted_class.item() == true_class else 0
         self.insert1(key)
 
         end = time.time()
-        elapsed = time.gmtime(end-start)
-        print(f'Classification took {elapsed.tm_min} min {elapsed.tm_sec} sec')
+        elapsed = time.gmtime(end - start)
+        print(f"Classification took {elapsed.tm_min} min {elapsed.tm_sec} sec")
 
 
-#@schema
-#class ReconstructionTransfer(mixins.MEITemplateMixin, dj.Computed):
+# @schema
+# class ReconstructionTransfer(mixins.MEITemplateMixin, dj.Computed):
 #    definition = """
 #    # contains maximally exciting images (MEIs)
 #    -> self.method_table
