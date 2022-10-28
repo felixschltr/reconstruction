@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import time
 import warnings
+from curses import keyname
 from functools import partial
 from typing import Any, Callable, Dict, List
 
@@ -18,11 +19,11 @@ Dataloaders = Dict[str, DataLoader]
 import datajoint as dj
 from mei import mixins
 from mei.import_helpers import import_object
-from nnfabrik.builder import resolve_fn
+from nnfabrik.builder import get_model, resolve_fn
 from nnfabrik.main import Dataset
 from nnfabrik.utility.dj_helpers import CustomSchema, cleanup_numpy_scalar, make_hash
 from reconstructing_robustness.dataset import C_SUBCATS, DATASET_NAMES, get_transforms
-from reconstructing_robustness.dj_tables.nnfabrik import TrainedModel
+from reconstructing_robustness.dj_tables.nnfabrik import Model, TrainedModel
 from reconstructing_robustness.model import model_fn
 from reconstructing_robustness.utils.reconstruction_utils import (
     get_class_by_img_path,
@@ -37,6 +38,7 @@ from ..modules.reducers import ConstrainedOutputModel
 
 schema = CustomSchema(dj.config.get("reconstruction_schema", "nnfabrik_core"))
 resolve_target_fn = partial(resolve_fn, default_base="targets")
+resolve_scaler_fn = partial(resolve_fn, default_base="scalers")
 
 
 DATADIR = "/data/fetched_from_attach"
@@ -464,7 +466,7 @@ class Reconstruction(mixins.MEITemplateMixin, dj.Computed):
         )
 
         reconstructed_image = mei_entity["mei"]
-        print("Getting model actiovations in resp. to MEI...")
+        print("Getting model activations in response to MEI...")
         reconstructed_responses = self.get_model_responses(
             model=wrapper, image=reconstructed_image,
         )
@@ -472,7 +474,7 @@ class Reconstruction(mixins.MEITemplateMixin, dj.Computed):
             original_responses=responses,
             reconstructed_responses=reconstructed_responses,
         )
-
+        print("Inserting MEI...")
         self._insert_mei(mei_entity)
         mei_entity.update(response_entity)
         self._insert_responses(mei_entity)
@@ -480,6 +482,121 @@ class Reconstruction(mixins.MEITemplateMixin, dj.Computed):
         end = time.time()
         elapsed = time.gmtime(end - start)
         print(f"reconstruction took {elapsed.tm_min} min {elapsed.tm_sec} sec")
+
+
+@schema
+class ReconScaler(dj.Manual):
+    definition = """
+    scaler_fn:                        varchar(128)
+    scaler_hash:                      varchar(64)
+    ---
+    scaler_config:                    longblob
+    scaler_comment:                   varchar(128)
+    """
+
+    resolve_fn = resolve_scaler_fn
+
+    @property
+    def fn_config(self):
+        scaler_fn, scaler_config = self.fetch1("scaler_fn", "scaler_config")
+        scaler_config = cleanup_numpy_scalar(scaler_config)
+        return scaler_fn, scaler_config
+
+    def add_entry(
+        self,
+        scaler_fn: str,
+        scaler_config: dict,
+        scaler_comment: str = "",
+        skip_duplicates=False,
+    ):
+
+        scaler_hash = make_hash((scaler_fn, scaler_config))
+        key = dict(
+            scaler_fn=scaler_fn,
+            scaler_config=scaler_config,
+            scaler_hash=scaler_hash,
+            scaler_comment=scaler_comment,
+        )
+        existing = self.proj() & key
+        if existing:
+            if skip_duplicates:
+                warnings.warn("Corresponding entry found. Skipping...")
+                key = (self & (existing)).fetch1()
+            else:
+                raise ValueError("Corresponding entry already exists")
+        else:
+            self.insert1(key)
+
+        return key
+
+    def get_scaler_fn(self, key=None, **kwargs):
+        key = self.fetch("KEY") if key is None else key
+        scaler_fn, scaler_config = (self & key).fn_config
+        return partial(self.resolve_fn(scaler_fn), **scaler_config, **kwargs)
+
+
+@schema
+class ReconstructionClassification(dj.Computed):
+    definition = """
+        # Contains classification results of re-scaled reconstructions
+        ->self.recon_table
+        ->self.model_table.proj(evaluator_model_fn="model_fn", evaluator_model_hash="model_hash")
+        ->self.scaler_fn_table
+        ---
+        norm_scaled: float # norm of the re-scaled reconstruction in z-score space
+        classification: int # the predicted class
+        correct: tinyint # 0/1 if it's the correct label
+        logits: longblob
+        """
+
+    model_table = Model
+    recon_table = Reconstruction
+    recon_img_table = ReconstructionImages
+    method_params_table = ReconMethodParameters
+    scaler_fn_table = ReconScaler
+
+    def make(self, key):
+
+        start = time.time()
+
+        img_path, norm_fraction, norm_orig = (
+            self.recon_table * self.recon_img_table * self.method_params_table & key
+        ).fetch1("img_path", "norm_fraction", "norm")
+        true_class_idx = get_class_by_img_path(img_path, return_idx_only=True)
+        # get (normlized) mei as torch tensor
+        mei = (self.recon_table & key).fetch1("mei", download_path=DATADIR)
+        mei = torch.load(mei)
+        # if norm_fraction is not full norm, scale reconstruction
+        scaler_fn = self.scaler_fn_table().get_scaler_fn(key=key, norm_orig=norm_orig)
+        if norm_fraction < 1.0:
+            mei = scaler_fn(mei)
+        # get model and evaluate
+        eval_model_restr = dict(model_hash=key["evaluator_model_hash"])
+        model_fn, model_config = (self.model_table & eval_model_restr).fn_config
+        model_comment = (self.model_table & eval_model_restr).fetch1("model_comment")
+        seed = (self.recon_table.trained_model_table & eval_model_restr).fetch1("seed")
+        model = get_model(
+            model_fn=model_fn, model_config=model_config, dataloaders={}, seed=seed
+        )
+        print(f"Evaluator model: {model_comment.split(',')[0]}")
+        # get model prediction
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model = model.to(device)
+        mei = mei.to(device)
+        model.eval()
+        with torch.no_grad():
+            logits = model(mei)
+            predicted_class = logits.argmax(dim=1, keepdim=True)
+        # add table entry
+        key["norm_scaled"] = torch.linalg.norm(mei).item()
+        key["classification"] = predicted_class.item()
+        key["correct"] = 1 if predicted_class.item() == true_class_idx else 0
+        key["logits"] = logits.detach().cpu().numpy()
+        self.insert1(key)
+
+        end = time.time()
+        elapsed = time.gmtime(end - start)
+        print(f"Classification took {elapsed.tm_min} min {elapsed.tm_sec} sec")
 
 
 @schema
