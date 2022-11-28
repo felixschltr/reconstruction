@@ -1,14 +1,14 @@
 import torch
 from mei.legacy.utils import varargin
 from reconstructing_robustness.utils.reconstruction_utils import (
-    CHANNEL_ZSCORE_MAX,
-    CHANNEL_ZSCORE_MIN,
+    channel_zscore_max,
+    channel_zscore_min,
 )
 from reconstruction.schema.main import ReconstructionImages
 
 
 class ChangeNormConditional:
-    """ Change the norm of the input.
+    """Change the norm of the input.
 
     Arguments:
         norm (float or tensor): Desired norm. If tensor, it should be the same length as
@@ -27,7 +27,7 @@ class ChangeNormConditional:
 
 
 class ChangeNormAndClip:
-    """ Change the norm of the input.
+    """Change the norm of the input.
     Arguments:
         norm (float or tensor): Desired norm. If tensor, it should be the same length as
             x.
@@ -36,8 +36,8 @@ class ChangeNormAndClip:
     def __init__(self, key, norm_fraction):
         img, norm = (ReconstructionImages() & key).fetch1("image", "norm")
         self.norm = norm_fraction * norm
-        self.x_min = CHANNEL_ZSCORE_MIN
-        self.x_max = CHANNEL_ZSCORE_MAX
+        self.x_min = channel_zscore_min
+        self.x_max = channel_zscore_max
 
     @varargin
     def __call__(self, x, iteration=None):

@@ -22,9 +22,11 @@ from mei.import_helpers import import_object
 from nnfabrik.builder import get_model, resolve_fn
 from nnfabrik.main import Dataset
 from nnfabrik.utility.dj_helpers import CustomSchema, cleanup_numpy_scalar, make_hash
-from reconstructing_robustness.dataset import C_SUBCATS, DATASET_NAMES, get_transforms
+from reconstructing_robustness.data.datasets import ImageNet, ImageNetC, dataset_names
+from reconstructing_robustness.dataset import get_transforms
 from reconstructing_robustness.dj_tables.nnfabrik import Model, TrainedModel
 from reconstructing_robustness.model import model_fn
+from reconstructing_robustness.utils.constants import FETCH_DIR
 from reconstructing_robustness.utils.reconstruction_utils import (
     get_class_by_img_path,
     rescale_mei_in_zspace,
@@ -39,9 +41,6 @@ from ..modules.reducers import ConstrainedOutputModel
 schema = CustomSchema(dj.config.get("reconstruction_schema", "nnfabrik_core"))
 resolve_target_fn = partial(resolve_fn, default_base="targets")
 resolve_scaler_fn = partial(resolve_fn, default_base="scalers")
-
-
-DATADIR = "/data/fetched_from_attach"
 
 
 @schema
@@ -69,7 +68,7 @@ class ReconstructionImages(dj.Manual):
         self,
         img_id: int,
         img_path: str,
-        dataset: str,
+        dataset,
         corruption: str,
         severity: int,
         img_comment: str,
@@ -85,20 +84,20 @@ class ReconstructionImages(dj.Manual):
         else:
             key["img_path"] = img_path
 
-        if not dataset in DATASET_NAMES:
-            raise ValueError(f"dataset must be one of {DATASET_NAMES}.")
+        if not dataset.name in dataset_names:
+            raise ValueError(f"dataset must be one of {dataset_names}.")
         else:
-            key["dataset"] = dataset
+            key["dataset"] = dataset.name
 
-        c_subcategories = sum(C_SUBCATS.values(), [])
+        c_subcategories = ImageNetC.subcategories
         # add empty string to represent clean ImageNet validation set
         c_subcategories += [""]
         if not corruption in c_subcategories:
             raise ValueError(f"corruption must be one of {c_subcategories}.")
-        elif corruption == "" and dataset == DATASET_NAMES[1]:  # ImageNet-C
-            raise ValueError(f"corruption does not match dataset {DATASET_NAMES[1]}.")
-        elif corruption != "" and dataset == DATASET_NAMES[0]:  # ImageNet
-            raise ValueError(f"corruption does not match {DATASET_NAMES[0]}.")
+        elif corruption == "" and dataset.name == ImageNetC.name:
+            raise ValueError(f"corruption does not match dataset {ImageNetC.name}.")
+        elif corruption != "" and dataset.name == ImageNet.name:
+            raise ValueError(f"corruption does not match {ImageNet.name}.")
         else:
             key["corruption"] = corruption
 
@@ -106,14 +105,16 @@ class ReconstructionImages(dj.Manual):
         valid_severities = [i for i in range(6)]
         if not severity in valid_severities:
             raise ValueError(f"severity must be one of {valid_severities}.")
-        elif severity == 0 and dataset == DATASET_NAMES[1]:  # ImageNet-C
-            raise ValueError(f"severity 0 does not match dataset {DATASET_NAMES[1]}.")
-        elif severity > 0 and dataset == DATASET_NAMES[0]:  # ImageNet
-            raise ValueError(f"severity > 0 does not match dataset {DATASET_NAMES[0]}.")
+        elif severity == 0 and dataset.name == ImageNetC.name:
+            raise ValueError(f"severity 0 does not match dataset {ImageNetC.name}.")
+        elif severity > 0 and dataset.name == ImageNet.name:
+            raise ValueError(f"severity > 0 does not match dataset {ImageNet.name}.")
         else:
             key["severity"] = severity
 
-        key["img_hash"] = make_hash([img_id, img_path, dataset, corruption, severity])
+        key["img_hash"] = make_hash(
+            [img_id, img_path, dataset.name, corruption, severity]
+        )
 
         # add image
         image = Image.open(img_path).convert("RGB")
@@ -342,7 +343,7 @@ class ReconTargetUnitParameters(dj.Computed):
 
     def make(self, key):
         """
-        Add entries 
+        Add entries
 
         Parameters
         ----------
@@ -384,10 +385,15 @@ class ReconObjective(dj.Computed):
         self.insert1(key)
 
     def get_output_selected_model(
-        self, model: Module, target_fn: Callable,
+        self,
+        model: Module,
+        target_fn: Callable,
     ) -> constrained_output_model:
 
-        return self.constrained_output_model(model=model, target_fn=target_fn,)
+        return self.constrained_output_model(
+            model=model,
+            target_fn=target_fn,
+        )
 
 
 @schema
@@ -431,7 +437,9 @@ class Reconstruction(mixins.MEITemplateMixin, dj.Computed):
 
     def get_model_responses(self, model, image, device="cuda"):
         with torch.no_grad():
-            responses = model(image.to(device),)
+            responses = model(
+                image.to(device),
+            )
         return responses
 
     def _insert_responses(self, response_entity: Dict[str, Any]) -> None:
@@ -460,21 +468,22 @@ class Reconstruction(mixins.MEITemplateMixin, dj.Computed):
         # ping DB to prevent LostConnectionError
         self.connection.ping()
 
-        print("Starting to generate MEI...")
+        print("Starting to generate MEI...")  # docker logs
         mei_entity = self.method_table().generate_mei(
             dataloaders, output_selected_model, key, seed
         )
 
         reconstructed_image = mei_entity["mei"]
-        print("Getting model activations in response to MEI...")
+        print("Getting model activations in response to MEI...")  # docker logs
         reconstructed_responses = self.get_model_responses(
-            model=wrapper, image=reconstructed_image,
+            model=wrapper,
+            image=reconstructed_image,
         )
         response_entity = dict(
             original_responses=responses,
             reconstructed_responses=reconstructed_responses,
         )
-        print("Inserting MEI...")
+        print("Inserting MEI...")  # docker logs
         self._insert_mei(mei_entity)
         mei_entity.update(response_entity)
         self._insert_responses(mei_entity)
@@ -539,9 +548,9 @@ class ReconScaler(dj.Manual):
 class ReconstructionClassification(dj.Computed):
     definition = """
         # Contains classification results of re-scaled reconstructions
-        ->self.recon_table
-        ->self.model_table.proj(evaluator_model_fn="model_fn", evaluator_model_hash="model_hash")
-        ->self.scaler_fn_table
+        -> self.recon_table
+        -> self.model_table.proj(evaluator_model_fn="model_fn", evaluator_model_hash="model_hash")
+        -> self.scaler_fn_table.proj()
         ---
         norm_scaled: float # norm of the re-scaled reconstruction in z-score space
         classification: int # the predicted class
@@ -551,7 +560,7 @@ class ReconstructionClassification(dj.Computed):
 
     model_table = Model
     recon_table = Reconstruction
-    recon_img_table = ReconstructionImages
+    image_table = ReconstructionImages
     method_params_table = ReconMethodParameters
     scaler_fn_table = ReconScaler
 
@@ -559,34 +568,37 @@ class ReconstructionClassification(dj.Computed):
 
         start = time.time()
 
-        img_path, norm_fraction, norm_orig = (
-            self.recon_table * self.recon_img_table * self.method_params_table & key
-        ).fetch1("img_path", "norm_fraction", "norm")
-        true_class_idx = get_class_by_img_path(img_path, return_idx_only=True)
-        # get (normlized) mei as torch tensor
-        mei = (self.recon_table & key).fetch1("mei", download_path=DATADIR)
-        mei = torch.load(mei)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        mei_path, norm_fraction, norm_orig = (
+            self.recon_table * self.image_table * self.method_params_table & key
+        ).fetch1("mei", "norm_fraction", "norm", download_path=FETCH_DIR)
+        true_class_idx = get_class_by_img_path(key["img_path"], return_idx_only=True)
+        # load (normlized) mei as torch tensor
+        assert os.path.exists(mei_path)
+        print("mei path: ", mei_path)  # docker logs
+        mei = torch.load(mei_path, map_location=torch.device(device))
         # if norm_fraction is not full norm, scale reconstruction
         scaler_fn = self.scaler_fn_table().get_scaler_fn(key=key, norm_orig=norm_orig)
+        scaler_comment = (self.scaler_fn_table & key).fetch1("scaler_comment")
         if norm_fraction < 1.0:
+            print("Scaling reconstruction using: " + scaler_comment)  # docker logs
             mei = scaler_fn(mei)
         # get model and evaluate
+        print("Getting evaluator model...")  # docker logs
         eval_model_restr = dict(model_hash=key["evaluator_model_hash"])
         model_fn, model_config = (self.model_table & eval_model_restr).fn_config
-        model_comment = (self.model_table & eval_model_restr).fetch1("model_comment")
-        seed = (self.recon_table.trained_model_table & eval_model_restr).fetch1("seed")
         model = get_model(
-            model_fn=model_fn, model_config=model_config, dataloaders={}, seed=seed
+            model_fn=model_fn,
+            model_config=model_config,
+            dataloaders={},
+            seed=key["seed"],
         )
-        print(f"Evaluator model: {model_comment.split(',')[0]}")
         # get model prediction
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        model = model.to(device)
-        mei = mei.to(device)
+        model, mei = model.to(device), mei.to(device)
         model.eval()
         with torch.no_grad():
             logits = model(mei)
-            predicted_class = logits.argmax(dim=1, keepdim=True)
+            predicted_class = logits.argmax()
         # add table entry
         key["norm_scaled"] = torch.linalg.norm(mei).item()
         key["classification"] = predicted_class.item()
@@ -620,7 +632,7 @@ class ReconClassification(dj.Computed):
         true_class = true_class_info[1]
         assert isinstance(true_class, int)
         # get (normlized) mei as torch tensor
-        mei = (Reconstruction() & key).fetch1("mei", download_path=DATADIR)
+        mei = (Reconstruction() & key).fetch1("mei", download_path=FETCH_DIR)
         mei = torch.load(mei)
         # get model and evaluate
         eval_model_restr = dict(model_hash=key["evaluator_model_hash"])
@@ -675,7 +687,7 @@ class ReconClassificationRescaled(dj.Computed):
         true_class = true_class_info[1]
         assert isinstance(true_class, int)
         # get (normlized) mei as torch tensor
-        mei = (Reconstruction() & key).fetch1("mei", download_path=DATADIR)
+        mei = (Reconstruction() & key).fetch1("mei", download_path=FETCH_DIR)
         mei = torch.load(mei)
         # if norm_fraction is not full norm, re-scale mei
         if norm_fraction < 1.0:
