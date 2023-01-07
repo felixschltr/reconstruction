@@ -176,11 +176,11 @@ class ReconMethodParameters(dj.Computed):
     ---
     lr: float   # list all the parameters here that are of interest
     norm_fraction: float    # fraction of full image norm
-    sigma: float
     n_iter: float
+    initial: varchar(64)
     optimizer: varchar(64)
-    precondition: varchar(64)
-    postprocessing: varchar(64)
+    precondition = "": varchar(64)
+    postprocessing = "": varchar(64)
     """
 
     def make(self, key):
@@ -192,12 +192,14 @@ class ReconMethodParameters(dj.Computed):
         key["norm_fraction"] = (
             method_config.get("postprocessing").get("kwargs").get("norm_fraction")
         )
+        key["initial"] = method_config.get("initial").get("path")
+        key["optimizer"] = method_config.get("optimizer").get("path")
         key["lr"] = method_config.get("optimizer").get("kwargs").get("lr")
         key["n_iter"] = method_config.get("stopper").get("kwargs").get("num_iterations")
-        key["sigma"] = method_config.get("precondition").get("kwargs").get("sigma")
-        key["optimizer"] = method_config.get("optimizer").get("path")
-        key["precondition"] = method_config.get("precondition").get("path")
-        key["postprocessing"] = method_config.get("postprocessing").get("path")
+        if "precondition" in method_config:
+            key["precondition"] = method_config.get("precondition").get("path")
+        if "postprocessing" in method_config:
+            key["postprocessing"] = method_config.get("postprocessing").get("path")
 
         self.insert1(key, ignore_extra_fields=True)
 
@@ -472,7 +474,7 @@ class Reconstruction(mixins.MEITemplateMixin, dj.Computed):
         mei_entity = self.method_table().generate_mei(
             dataloaders, output_selected_model, key, seed
         )
-
+        print("score = ", mei_entity["score"])  # docker logs
         reconstructed_image = mei_entity["mei"]
         print("Getting model activations in response to MEI...")  # docker logs
         reconstructed_responses = self.get_model_responses(
