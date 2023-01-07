@@ -20,7 +20,7 @@ class ChangeNormConditional:
 
     @varargin
     def __call__(self, x, iteration=None):
-        x_norm = torch.norm(x.view(len(x), -1), dim=-1)
+        x_norm = torch.linalg.norm(x.view(len(x), -1), dim=-1)
         if x_norm >= self.norm:
             x = x * (self.norm / x_norm).view(len(x), *[1] * (x.dim() - 1))
         return x
@@ -41,7 +41,7 @@ class ChangeNormAndClip:
 
     @varargin
     def __call__(self, x, iteration=None):
-        x_norm = torch.norm(x.view(len(x), -1), dim=-1)
+        x_norm = torch.linalg.norm(x.view(len(x), -1), dim=-1)
         if x_norm >= self.norm:
             x = x * (self.norm / x_norm).view(len(x), *[1] * (x.dim() - 1))
 
