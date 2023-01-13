@@ -25,18 +25,10 @@ from nnfabrik.utility.dj_helpers import CustomSchema, cleanup_numpy_scalar, make
 from reconstructing_robustness.data.datasets import ImageNet, ImageNetC, dataset_names
 from reconstructing_robustness.dataset import get_transforms
 from reconstructing_robustness.dj_tables.nnfabrik import Model, TrainedModel
-from reconstructing_robustness.model import model_fn
 from reconstructing_robustness.utils.constants import FETCH_DIR
-from reconstructing_robustness.utils.reconstruction_utils import (
-    get_class_by_img_path,
-    rescale_mei_in_zspace,
-)
+from reconstructing_robustness.utils.reconstruction_utils import get_class_by_img_path
 
 from ..modules.reducers import ConstrainedOutputModel
-
-# from bias_transfer.tables.trained_model import *
-# from bias_transfer.tables.trained_transfer_model import *
-
 
 schema = CustomSchema(dj.config.get("reconstruction_schema", "nnfabrik_core"))
 resolve_target_fn = partial(resolve_fn, default_base="targets")
