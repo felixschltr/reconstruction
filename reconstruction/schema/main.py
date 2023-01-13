@@ -611,3 +611,199 @@ class ReconstructionClassification(dj.Computed):
         end = time.time()
         elapsed = time.gmtime(end - start)
         print(f"Classification took {elapsed.tm_min} min {elapsed.tm_sec} sec")
+
+
+@schema
+class ReconClassification(dj.Computed):
+    definition = """
+        ->Reconstruction
+        ->Model.proj(evaluator_model_fn='model_fn', evaluator_model_hash='model_hash')
+        ---
+        classification: int # the predicted class
+        correct: tinyint # 0/1 if it's the correct label
+        """
+
+    def make(self, key):
+        # load reconstruction, load model, get classification
+
+        start = time.time()
+
+        # get true class of original image
+        img_path = (Reconstruction().image_table() & key).fetch1("img_path")
+        true_class_info = get_class_by_img_path(img_path)
+        true_class = true_class_info[1]
+        assert isinstance(true_class, int)
+        # get (normlized) mei as torch tensor
+        mei = (Reconstruction() & key).fetch1("mei", download_path=FETCH_DIR)
+        mei = torch.load(mei)
+        # get model and evaluate
+        eval_model_restr = dict(model_hash=key["evaluator_model_hash"])
+        model_config, model_comment = (
+            Reconstruction().trained_model_table().model_table() & eval_model_restr
+        ).fetch1("model_config", "model_comment")
+        seed = (Reconstruction().trained_model_table() & eval_model_restr).fetch1(
+            "seed"
+        )
+        model = model_fn({}, seed, **model_config)
+        print(f"Model: {model_comment}")
+        # get model prediction
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model = model.to(device)
+        mei = mei.to(device)
+        model.eval()
+        with torch.no_grad():
+            logits = model(mei)
+            predicted_class = logits.argmax(dim=1, keepdim=True)
+        # add table entry
+        key["classification"] = predicted_class.item()
+        key["correct"] = 1 if predicted_class.item() == true_class else 0
+        self.insert1(key)
+
+        end = time.time()
+        elapsed = time.gmtime(end - start)
+        print(f"Classification took {elapsed.tm_min} min {elapsed.tm_sec} sec")
+
+
+@schema
+class ReconClassificationRescaled(dj.Computed):
+    definition = """
+        # Contains classification results of re-scaled reconstructions/MEIs
+        ->Reconstruction
+        ->Model.proj(evaluator_model_fn='model_fn', evaluator_model_hash='model_hash')
+        ---
+        norm_rescaled: float # norm of the re-scaled MEI in z-space (normalized)
+        classification: int # the predicted class
+        correct: tinyint # 0/1 if it's the correct label
+        """
+
+    def make(self, key):
+        # load reconstruction, load model, get classification
+
+        start = time.time()
+
+        # get true class of original image
+        img_path, norm_fraction = (
+            Reconstruction() * ReconMethodParameters() & key
+        ).fetch1("img_path", "norm_fraction")
+        true_class_info = get_class_by_img_path(img_path)
+        true_class = true_class_info[1]
+        assert isinstance(true_class, int)
+        # get (normlized) mei as torch tensor
+        mei = (Reconstruction() & key).fetch1("mei", download_path=FETCH_DIR)
+        mei = torch.load(mei)
+        # if norm_fraction is not full norm, re-scale mei
+        if norm_fraction < 1.0:
+            mei = rescale_mei_in_zspace(mei)
+        # get model and evaluate
+        eval_model_restr = dict(model_hash=key["evaluator_model_hash"])
+        model_config, model_comment = (
+            Reconstruction().trained_model_table().model_table() & eval_model_restr
+        ).fetch1("model_config", "model_comment")
+        seed = (Reconstruction().trained_model_table() & eval_model_restr).fetch1(
+            "seed"
+        )
+        model = model_fn({}, seed, **model_config)
+        print(f"Model: {model_comment}")
+        # get model prediction
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model = model.to(device)
+        mei = mei.to(device)
+        model.eval()
+        with torch.no_grad():
+            logits = model(mei)
+            predicted_class = logits.argmax(dim=1, keepdim=True)
+        # add table entry
+        key["norm_rescaled"] = np.linalg.norm(mei.detach().cpu())
+        key["classification"] = predicted_class.item()
+        key["correct"] = 1 if predicted_class.item() == true_class else 0
+        self.insert1(key)
+
+        end = time.time()
+        elapsed = time.gmtime(end - start)
+        print(f"Classification took {elapsed.tm_min} min {elapsed.tm_sec} sec")
+
+
+# @schema
+# class ReconstructionTransfer(mixins.MEITemplateMixin, dj.Computed):
+#    definition = """
+#    # contains maximally exciting images (MEIs)
+#    -> self.method_table
+#    -> self.trained_model_table
+#    -> self.selector_table
+#    -> self.image_table
+#    -> self.seed_table
+#    ---
+#    mei                 : attach@minio  # the MEI as a tensor
+#    score               : float         # some score depending on the used method function
+#    output              : attach@minio  # object returned by the method function
+#    """
+#
+#    trained_model_table = TrainedTransferModel
+#    selector_table = ReconObjective
+#    target_fn_table = ReconTargetFunction
+#    target_unit_table = ReconTargetUnit
+#    method_table = ReconMethod
+#    image_table = ReconstructionImages
+#    seed_table = ReconSeed
+#    storage = "minio"
+#    database = ""  # hack to supress DJ error
+#
+#    class Responses(dj.Part):
+#        @property
+#        def definition(self):
+#            definition = """
+#            # Contains the models state dict, stored externally.
+#            -> master
+#            ---
+#            original_responses:                 attach@{storage}
+#            reconstructed_responses:            attach@{storage}
+#            """.format(
+#                storage=self._master.storage
+#            )
+#            return definition
+#
+#    def get_model_responses(self, model, image, device="cuda"):
+#        with torch.no_grad():
+#            responses = model(
+#                image.to(device),
+#            )
+#        return responses
+#
+#    def _insert_responses(self, response_entity: Dict[str, Any]) -> None:
+#        """Saves the MEI to a temporary directory and inserts the prepared entity into the table."""
+#        with self.get_temp_dir() as temp_dir:
+#            for name in ("original_responses", "reconstructed_responses"):
+#                self._save_to_disk(response_entity, temp_dir, name)
+#            self.Responses.insert1(response_entity, ignore_extra_fields=True)
+#
+#    def make(self, key):
+#        dataloaders, model = self.model_loader.load(key=key)
+#        model.eval().cuda()
+#        seed = (self.seed_table() & key).fetch1("mei_seed")
+#        image = torch.from_numpy((self.image_table & key).fetch1("image"))
+#        if image.shape[1] ==1:
+#            image = image.repeat(1,3,1,1)
+#        wrapper = self.target_unit_table().get_wrapper(key, model)
+#        responses = self.get_model_responses(wrapper, image)
+#        target_fn = (self.target_fn_table & key).get_target_fn(responses=responses)
+#        output_selected_model = self.selector_table().get_output_selected_model(
+#            model=wrapper, target_fn=target_fn
+#        )
+#
+#        mei_entity = self.method_table().generate_mei(
+#            dataloaders, output_selected_model, key, seed
+#        )
+#
+#        reconstructed_image = mei_entity["mei"]
+#        reconstructed_responses = self.get_model_responses(
+#            model=wrapper,
+#            image=reconstructed_image,
+#        )
+#        response_entity = dict(
+#            original_responses=responses,
+#            reconstructed_responses=reconstructed_responses,
+#        )
+#
+#        self._insert_mei(mei_entity)
+#        mei_entity.update(response_entity)
+#        self._insert_responses(mei_entity)
